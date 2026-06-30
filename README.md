@@ -1,0 +1,1 @@
+# hegemony-secret-plugins
