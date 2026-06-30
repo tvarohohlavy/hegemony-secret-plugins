@@ -104,3 +104,41 @@ def test_test_raises_vault_error_on_connectivity_failure():
         raise AssertionError("expected VaultError")
     except VaultError:
         pass
+
+
+def test_vault_backend_config_defaults():
+    config = VaultBackendConfig(address="http://vault:8200")
+    assert config.address == "http://vault:8200"
+    assert config.kv_mount == "hegemony"
+    assert config.path_prefix == ""
+    assert config.verify_ssl is True
+
+
+def test_vault_backend_config_all_fields():
+    config = VaultBackendConfig(
+        address="https://vault.example.com:8200",
+        kv_mount="secrets",
+        path_prefix="orgs",
+        role_id="test-role-id",
+        secret_id="test-secret-id",
+        ca_cert_file="/path/to/ca.crt",
+        verify_ssl=True,
+    )
+    assert config.kv_mount == "secrets"
+    assert config.path_prefix == "orgs"
+    assert config.role_id == "test-role-id"
+    assert config.secret_id == "test-secret-id"
+    assert config.ca_cert_file == "/path/to/ca.crt"
+
+
+def test_vault_backend_missing_auth_raises():
+    config = VaultBackendConfig(address="http://vault:8200")
+    assert config.role_id is None
+    assert config.secret_id is None
+    with patch("hvac.Client") as mock_client_cls:
+        mock_client_cls.return_value = MagicMock(token=None)
+        try:
+            VaultSecretsBackend(config)
+            raise AssertionError("expected ValueError for missing auth")
+        except ValueError as exc:
+            assert "role_id" in str(exc).lower()
