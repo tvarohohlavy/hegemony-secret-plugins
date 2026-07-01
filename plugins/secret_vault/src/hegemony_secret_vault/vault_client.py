@@ -76,8 +76,11 @@ class VaultBackendConfig:
         Returns:
             VaultBackendConfig instance
         """
+        address = config.get("address")
+        if not address:
+            raise ValueError("Vault backend config is missing required field: address")
         return cls(
-            address=config.get("address", "http://vault:8200"),
+            address=address,
             kv_mount=config.get("kv_mount", "hegemony"),
             path_prefix=config.get("path_prefix", ""),
             token=_normalize_auth_value(config.get("token")),
@@ -141,7 +144,7 @@ class VaultSecretsBackend:
 
         # Initialize hvac client
         verify: bool | str = config.verify_ssl
-        if config.ca_cert_file:
+        if config.verify_ssl and config.ca_cert_file:
             verify = config.ca_cert_file
 
         self._client = hvac.Client(url=config.address, verify=verify)

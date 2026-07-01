@@ -18,6 +18,7 @@ import logging
 import threading
 from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version as _package_version
 from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,19 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 _DEFAULT_INTEGRATION_NAME = "Hegemony"
-_INTEGRATION_VERSION = "0.1.0"
+
+
+def _integration_version() -> str:
+    """Return this plugin's installed release version for 1Password integration reporting.
+
+    Falls back to a placeholder if the package's distribution metadata is unavailable
+    (e.g. running from source without an installed distribution) so authentication
+    still succeeds.
+    """
+    try:
+        return _package_version("hegemony-secret-1password")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 def _split_path(path: str) -> tuple[str, str]:
@@ -153,7 +166,7 @@ class OnePasswordServiceAccountBackend:
         return await Client.authenticate(
             auth=self._config.service_account_token,
             integration_name=self._config.integration_name,
-            integration_version=_INTEGRATION_VERSION,
+            integration_version=_integration_version(),
         )
 
     def _ensure_client(self) -> Any:

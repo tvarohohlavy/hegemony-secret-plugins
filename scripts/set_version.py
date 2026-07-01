@@ -34,11 +34,11 @@ def _set_project_version(pyproject, version: str) -> None:
 
 def _set_plugin_sdk_pin(pyproject, version: str) -> None:
     text = pyproject.read_text(encoding="utf-8")
-    text = re.sub(
+    text = _replace(
         r"hegemony-secret-sdk(?:==|>=)[^\",<\]]*(?:,<\d+\.\d+(?:\.\d+)?)?",
         f"hegemony-secret-sdk=={version}",
         text,
-        count=1,
+        path=str(pyproject),
     )
     pyproject.write_text(text, encoding="utf-8")
 

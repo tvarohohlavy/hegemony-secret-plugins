@@ -88,6 +88,22 @@ def test_write_calls_create_or_update_secret():
     )
 
 
+def test_delete_calls_delete_metadata_and_all_versions():
+    backend, mock_client = _backend_with_mock_client()
+    backend.delete("orgs/default/secrets/db")
+    mock_client.secrets.kv.v2.delete_metadata_and_all_versions.assert_called_once_with(
+        path="orgs/default/secrets/db", mount_point="hegemony"
+    )
+
+
+def test_delete_ignores_invalid_path():
+    from hvac.exceptions import InvalidPath
+
+    backend, mock_client = _backend_with_mock_client()
+    mock_client.secrets.kv.v2.delete_metadata_and_all_versions.side_effect = InvalidPath()
+    backend.delete("orgs/default/secrets/db")  # should not raise
+
+
 def test_test_calls_auth_check_and_reads_kv_configuration():
     backend, mock_client = _backend_with_mock_client()
     backend.test()

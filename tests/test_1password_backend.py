@@ -132,6 +132,19 @@ def test_connect_read_raises_value_error_for_malformed_path():
         assert "vault" in str(exc).lower() or "path" in str(exc).lower()
 
 
+def test_connect_read_returns_none_for_missing_item():
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_item.side_effect = FailedToRetrieveItemException(
+        "Found 0 items", status_code=404
+    )
+
+    result = backend.read("Engineering/Database")
+
+    assert result is None
+
+
 def test_connect_write_raises_not_implemented():
     backend, _ = _connect_backend_with_mock_client()
     try:
@@ -249,7 +262,7 @@ def test_service_account_write_raises_not_implemented():
 def test_service_account_test_calls_vaults_list():
     backend, mock_client = _service_account_backend_with_mock_client()
     backend.test()
-    assert mock_client.vaults.list.call_count >= 1
+    mock_client.vaults.list.assert_called_once()
 
 
 def test_service_account_config_defaults():

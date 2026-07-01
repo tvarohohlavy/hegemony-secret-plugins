@@ -44,5 +44,12 @@ class SecretBackendRegistry(Protocol):
         config_schema: dict[str, Any] | None = None,
         default_config: dict[str, Any] | None = None,
     ) -> None:
-        """Register a secret backend type with its config factory."""
+        """Register a secret backend type with its config factory.
+
+        ``config_model`` and ``config_schema`` are both optional and independent; a
+        plugin may supply either, both, or neither. Neither takes precedence over the
+        other — the host may use ``config_model`` for validation/parsing and
+        ``config_schema`` for UI rendering, so provide whichever (or both) your
+        plugin needs.
+        """
         ...

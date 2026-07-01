@@ -43,21 +43,17 @@ def main() -> None:
             cwd=ROOT,
             check=True,
         )
-        code = """
+        code = f"""
 from importlib import import_module
 from importlib.metadata import entry_points
 
-modules = (
-    "hegemony_secret_sdk",
-    "hegemony_secret_vault",
-    "hegemony_secret_1password",
-)
+modules = {EXPECTED_MODULES!r}
 for module in modules:
     import_module(module)
 
 entries = entry_points(group="hegemony.secret_backends")
-names = {entry.name for entry in entries}
-expected = {"vault", "onepassword"}
+names = {{entry.name for entry in entries}}
+expected = {EXPECTED_ENTRY_POINTS!r}
 missing = expected - names
 assert not missing, missing
 """

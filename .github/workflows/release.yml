@@ -10,9 +10,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -25,6 +23,10 @@ jobs:
   release:
     name: Build And Publish Wheel Assets
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create the GitHub Release and upload assets
+      id-token: write # to mint OIDC tokens for attestation signing
+      attestations: write # to attach build provenance attestations
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

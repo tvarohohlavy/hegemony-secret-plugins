@@ -117,10 +117,13 @@ class OnePasswordConnectBackend:
         Raises:
             ValueError: If ``path`` is not exactly two non-empty parts.
         """
+        from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
         vault, item = _split_path(path)
 
-        result = self._client.get_item(item, vault)
-        if result is None:
+        try:
+            result = self._client.get_item(item, vault)
+        except FailedToRetrieveItemException:
             return None
 
         return {field.label: field.value for field in result.fields if field.value is not None}
