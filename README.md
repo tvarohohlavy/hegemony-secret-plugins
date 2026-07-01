@@ -9,6 +9,7 @@ Standalone release repo for Hegemony secret backend plugin packages:
 
 - `hegemony-secret-sdk`
 - `hegemony-secret-vault`
+- `hegemony-secret-1password`
 
 The SDK and all plugin wheels are released together from unified semver tags such as
 `v0.1.0`. Plugin wheels depend on the exact SDK version from the same release.
@@ -29,20 +30,26 @@ Contributions require the [Hegemony Contributor License Agreement](CLA.md). See
 ## What is auto-installed vs opt-in
 
 - **Auto-installed** with the platform (already present in Hegemony API and worker
-  images): none of these packages are currently bundled with the host.
-- **Opt-in**: `hegemony-secret-vault` adds the HashiCorp Vault KV v2 backend
-  (`vault` / `vault_kv2` / `vault_kv1` backend types). Install it in any deployment
-  that wants to configure a Vault-backed secrets backend.
+  images): `hegemony-secret-sdk` and `hegemony-secret-vault` (the built-in HashiCorp
+  Vault KV v2 backend — `vault` / `vault_kv2` / `vault_kv1` backend types). See its
+  [README](plugins/secret_vault/README.md).
+- **Opt-in**: `hegemony-secret-1password` adds the 1Password backend
+  (`onepassword_connect` / `onepassword_service_account` backend types). Install it in any
+  deployment that wants a 1Password-backed secrets backend. See its
+  [README](plugins/secret_1password/README.md).
 
 Both the **API** (to list/validate the backend type and resolve secrets) and the
-**worker** (to resolve secrets at run time) must have the pack installed. Restart both
-after installing so each registry reloads its entry points. Do not use `--system`;
-Hegemony runs from `/opt/venv`.
+**worker** (to resolve secrets at run time) must have an opt-in plugin installed to use it.
+Restart both after installing so each registry reloads its entry points. Do not use
+`--system`; Hegemony runs from `/opt/venv`.
 
 ## Install From A Release
 
 Released wheels are published with a `SHA256SUMS` file. Verify downloaded wheels before
-installing them.
+installing them. `hegemony-secret-sdk` and `hegemony-secret-vault` are already in the API
+and worker images, so only the opt-in `hegemony-secret-1password` wheel is installed here.
+It is installed *with* dependencies so its 1Password SDKs (`onepasswordconnectsdk`,
+`onepassword-sdk`) are pulled in.
 
 ```bash
 VERSION=0.1.0
@@ -58,13 +65,12 @@ tmp=\$(mktemp -d)
 cd \"\${tmp}\"
 curl -fsSLO \"\${base}/SHA256SUMS\"
 for wheel in \
-  hegemony_secret_sdk-\${version}-py3-none-any.whl \
-  hegemony_secret_vault-\${version}-py3-none-any.whl
+  hegemony_secret_1password-\${version}-py3-none-any.whl
 do
   curl -fsSLO \"\${base}/\${wheel}\"
   grep \"  \${wheel}$\" SHA256SUMS | sha256sum -c -
 done
-uv pip install --python /opt/venv/bin/python --no-deps ./*.whl
+uv pip install --python /opt/venv/bin/python ./*.whl
 rm -rf \"\${tmp}\"
 "
   docker restart "${CONTAINER}"
@@ -81,9 +87,8 @@ for CONTAINER in hegemony-dev-api-1 hegemony-dev-worker-1; do
   docker exec -u root "${CONTAINER}" mkdir -p /tmp/secret-wheels
   docker cp dist/. "${CONTAINER}:/tmp/secret-wheels/"
   docker exec -u root -it "${CONTAINER}" bash -lc '
-  uv pip install --python /opt/venv/bin/python --no-deps \
-    /tmp/secret-wheels/hegemony_secret_sdk-*.whl \
-    /tmp/secret-wheels/hegemony_secret_vault-*.whl
+  uv pip install --python /opt/venv/bin/python \
+    /tmp/secret-wheels/hegemony_secret_1password-*.whl
   '
   docker restart "${CONTAINER}"
 done
@@ -133,7 +138,7 @@ task version:set -- 0.1.0
 task lock
 ```
 
-Tags must match package metadata. A `v0.1.0` tag publishes two wheels plus `SHA256SUMS` to
+Tags must match package metadata. A `v0.1.0` tag publishes three wheels plus `SHA256SUMS` to
 the matching GitHub Release.
 
 Releases are intended to be immutable: the release workflow fails if a GitHub Release for
