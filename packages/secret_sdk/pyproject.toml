@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-secret-sdk"
+version = "0.1.0"
+description = "Public SDK for Hegemony secret backend plugins"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+requires-python = ">=3.11"
+# Intentionally dependency-light: pydantic only. This package must never import
+# FastAPI, SQLAlchemy, Temporal, or any Hegemony app internals so out-of-tree
+# plugin wheels can depend on it without pulling the platform.
+dependencies = ["pydantic>=2.7"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_secret_sdk"
+module-root = "src"

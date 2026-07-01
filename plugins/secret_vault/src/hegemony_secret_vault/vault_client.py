@@ -1,0 +1,425 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""Vault secrets backend client.
+
+This module provides a client for HashiCorp Vault KV v2 secrets engine.
+It handles AppRole authentication, token caching, and automatic re-authentication.
+
+The client is designed to be used by both API and Worker components.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Token expiry buffer in seconds - refresh token this many seconds before expiry
+TOKEN_EXPIRY_BUFFER_SECONDS = 60
+
+
+def _normalize_auth_value(value: Any) -> str | None:
+    """Normalize line-oriented Vault auth material from env/file placeholders."""
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+@dataclass
+class VaultBackendConfig:
+    """Configuration for a Vault backend.
+
+    Attributes:
+        address: Vault server address (e.g., "http://vault:8200")
+        kv_mount: KV v2 mount point (default: "hegemony")
+        path_prefix: Optional prefix for all paths (default: "")
+        token: Static Vault token (for dev mode - takes precedence over AppRole)
+        role_id: AppRole role ID (or path to file with _file suffix)
+        secret_id: AppRole secret ID (or path to file with _file suffix)
+        role_id_file: Path to file containing role ID
+        secret_id_file: Path to file containing secret ID
+        ca_cert_file: Optional path to CA certificate for TLS
+        verify_ssl: Whether to verify SSL certificates (default: True)
+    """
+
+    address: str
+    kv_mount: str = "hegemony"
+    path_prefix: str = ""
+    token: str | None = None
+    role_id: str | None = None
+    secret_id: str | None = None
+    role_id_file: str | None = None
+    secret_id_file: str | None = None
+    ca_cert_file: str | None = None
+    verify_ssl: bool = True
+
+    @classmethod
+    def from_dict(cls, config: dict) -> VaultBackendConfig:
+        """Create VaultBackendConfig from a dictionary.
+
+        This is a convenience method for creating a config from resolved
+        backend configuration (e.g., from database or API response).
+
+        Args:
+            config: Dictionary with config values. Supports both 'verify_ssl' and
+                    legacy 'verify' key for SSL verification setting.
+
+        Returns:
+            VaultBackendConfig instance
+        """
+        address = config.get("address")
+        if not address:
+            raise ValueError("Vault backend config is missing required field: address")
+        return cls(
+            address=address,
+            kv_mount=config.get("kv_mount", "hegemony"),
+            path_prefix=config.get("path_prefix", ""),
+            token=_normalize_auth_value(config.get("token")),
+            role_id=_normalize_auth_value(config.get("role_id")),
+            secret_id=_normalize_auth_value(config.get("secret_id")),
+            role_id_file=config.get("role_id_file"),
+            secret_id_file=config.get("secret_id_file"),
+            ca_cert_file=config.get("ca_cert_file"),
+            verify_ssl=config.get("verify_ssl", config.get("verify", True)),
+        )
+
+
+class VaultSecretsBackend:
+    """Vault KV v2 secrets backend using AppRole authentication.
+
+    This client provides:
+    - AppRole authentication with automatic token refresh
+    - Thread-safe token caching
+    - KV v2 read/write operations
+    - Path prefix support for multi-tenant isolation
+
+    Example:
+        config = VaultBackendConfig(
+            address="http://vault:8200",
+            role_id="abc123",
+            secret_id="xyz789",
+        )
+        backend = VaultSecretsBackend(config)
+
+        # Read a secret
+        data = backend.read("orgs/default/secrets/db")
+        password = data["password"]
+
+        # Write a secret
+        backend.write("orgs/default/secrets/db", {"password": "new-pass"})
+    """
+
+    def __init__(self, config: VaultBackendConfig):
+        """Initialize the Vault backend.
+
+        Args:
+            config: Vault backend configuration
+
+        Raises:
+            ImportError: If hvac library is not installed
+            ValueError: If token auth not provided and neither role_id nor role_id_file is provided
+        """
+        try:
+            import hvac
+        except ImportError as e:
+            raise ImportError(
+                "hvac library is required for Vault integration. Install with: pip install hvac"
+            ) from e
+
+        self._config = config
+        self._client: Any = None
+        self._token_expiry: float = 0
+        self._lock = threading.Lock()
+        self._static_token = _normalize_auth_value(config.token)
+        self._use_token_auth = bool(self._static_token)
+
+        # Initialize hvac client
+        verify: bool | str = config.verify_ssl
+        if config.verify_ssl and config.ca_cert_file:
+            verify = config.ca_cert_file
+
+        self._client = hvac.Client(url=config.address, verify=verify)
+
+        if self._use_token_auth:
+            # Token auth (dev mode) - use static token directly
+            logger.debug("Using static token auth for Vault")
+            self._client.token = self._static_token
+            self._role_id = ""
+            self._secret_id = ""
+        else:
+            # AppRole auth (production) - resolve credentials from files if needed
+            self._role_id = self._resolve_credential(config.role_id, config.role_id_file, "role_id")
+            self._secret_id = self._resolve_credential(
+                config.secret_id, config.secret_id_file, "secret_id"
+            )
+
+    @staticmethod
+    def _resolve_credential(
+        value: str | None,
+        file_path: str | None,
+        name: str,
+    ) -> str:
+        """Resolve a credential from direct value or file.
+
+        Args:
+            value: Direct credential value
+            file_path: Path to file containing credential
+            name: Credential name for error messages
+
+        Returns:
+            The credential value
+
+        Raises:
+            ValueError: If neither value nor file_path is provided
+        """
+        normalized = _normalize_auth_value(value)
+        if normalized:
+            return normalized
+
+        if file_path:
+            if not os.path.exists(file_path):
+                raise ValueError(f"{name} file not found: {file_path}")
+            with open(file_path) as f:
+                return f.read().strip()
+
+        raise ValueError(f"Either {name} or {name}_file must be provided for Vault authentication")
+
+    def _ensure_authenticated(self) -> None:
+        """Ensure we have a valid Vault token, re-authenticating if needed.
+
+        This method is thread-safe and will only authenticate once even if
+        called concurrently from multiple threads.
+
+        For static token auth (dev mode), this is a no-op since the token
+        is set during initialization.
+        """
+        # Token auth (dev mode) - no authentication needed
+        if self._use_token_auth:
+            return
+
+        # Fast path: check if token is valid (acquires lock internally)
+        if self._is_token_valid():
+            return
+
+        with self._lock:
+            # Double-check after acquiring outer lock to prevent race
+            if self._is_token_valid_unlocked():
+                return
+
+            self._authenticate()
+
+    def _is_token_valid_unlocked(self) -> bool:
+        """Check if the current token is valid WITHOUT acquiring lock.
+
+        Returns:
+            True if the token exists and hasn't expired (with 60s buffer)
+
+        Note: This method MUST only be called while holding self._lock.
+        Use _is_token_valid() for thread-safe access from outside the lock.
+        """
+        # Static token auth - always valid (token doesn't expire)
+        if self._use_token_auth:
+            return True
+
+        if not self._client.token:
+            return False
+        return time.time() < (self._token_expiry - TOKEN_EXPIRY_BUFFER_SECONDS)
+
+    def _is_token_valid(self) -> bool:
+        """Check if the current token is still valid (thread-safe).
+
+        Returns:
+            True if the token exists and hasn't expired (with buffer)
+
+        Note: This method acquires the lock to ensure thread-safe reads
+        of token and expiry that are consistent with _ensure_authenticated.
+        """
+        # Static token auth - always valid
+        if self._use_token_auth:
+            return True
+
+        with self._lock:
+            return self._is_token_valid_unlocked()
+
+    def _authenticate(self) -> None:
+        """Authenticate to Vault using AppRole.
+
+        Raises:
+            VaultAuthError: If authentication fails
+        """
+        try:
+            logger.debug("Authenticating to Vault with AppRole")
+
+            response = self._client.auth.approle.login(
+                role_id=self._role_id,
+                secret_id=self._secret_id,
+            )
+
+            # Extract token TTL and set expiry
+            auth_data = response.get("auth", {})
+            lease_duration = auth_data.get("lease_duration", 3600)
+            self._token_expiry = time.time() + lease_duration
+
+            logger.info(
+                "Vault authentication successful, token valid for %d seconds",
+                lease_duration,
+            )
+
+        except Exception as e:
+            logger.error("Vault authentication failed: %s", e)
+            raise VaultAuthError(f"Vault AppRole authentication failed: {e}") from e
+
+    def _full_path(self, path: str) -> str:
+        """Build full path including prefix.
+
+        Args:
+            path: Relative path within the backend
+
+        Returns:
+            Full path including prefix
+        """
+        if self._config.path_prefix:
+            return f"{self._config.path_prefix.rstrip('/')}/{path.lstrip('/')}"
+        return path
+
+    def read(self, path: str) -> dict[str, Any] | None:
+        """Read a secret from Vault KV v2.
+
+        Args:
+            path: Path to the secret (relative to kv_mount and path_prefix)
+
+        Returns:
+            Dictionary containing the secret data, or None if not found
+
+        Raises:
+            VaultError: If the read operation fails (other than not found)
+        """
+        # Import hvac exceptions at the top of method (outside try block)
+        from hvac.exceptions import InvalidPath
+
+        self._ensure_authenticated()
+
+        full_path = self._full_path(path)
+
+        try:
+            response = self._client.secrets.kv.v2.read_secret_version(
+                path=full_path,
+                mount_point=self._config.kv_mount,
+            )
+
+            if response is None:
+                return None
+
+            return response.get("data", {}).get("data")
+
+        except InvalidPath:
+            # Explicit handling for missing values
+            logger.debug("Value not found at path: %s", full_path)
+            return None
+        except Exception as e:
+            # Handle any other errors
+            logger.error("Vault read failed for path %s: %s", full_path, e)
+            raise VaultError(f"Failed to read secret from Vault: {e}") from e
+
+    def write(self, path: str, data: Mapping[str, Any]) -> None:
+        """Write a secret to Vault KV v2.
+
+        Args:
+            path: Path to the secret (relative to kv_mount and path_prefix)
+            data: Dictionary of key-value pairs to store
+
+        Raises:
+            VaultError: If the write operation fails
+        """
+        self._ensure_authenticated()
+
+        full_path = self._full_path(path)
+
+        try:
+            self._client.secrets.kv.v2.create_or_update_secret(
+                path=full_path,
+                secret=data,
+                mount_point=self._config.kv_mount,
+            )
+            logger.debug("Value written to path: %s", full_path)
+
+        except Exception as e:
+            logger.error("Vault write failed for path %s: %s", full_path, e)
+            raise VaultError(f"Failed to write secret to Vault: {e}") from e
+
+    def delete(self, path: str) -> None:
+        """Delete a secret from Vault KV v2 (permanent deletion).
+
+        This permanently deletes the secret metadata and ALL versions.
+        This operation cannot be undone.
+
+        Args:
+            path: Path to the secret
+
+        Raises:
+            VaultError: If the delete operation fails
+        """
+        from hvac.exceptions import InvalidPath
+
+        self._ensure_authenticated()
+
+        full_path = self._full_path(path)
+
+        try:
+            self._client.secrets.kv.v2.delete_metadata_and_all_versions(
+                path=full_path,
+                mount_point=self._config.kv_mount,
+            )
+            logger.debug("Value deleted at path: %s", full_path)
+
+        except InvalidPath:
+            logger.debug("Value already deleted or not found: %s", full_path)
+            return
+        except Exception as e:
+            logger.error("Vault delete failed for path %s: %s", full_path, e)
+            raise VaultError(f"Failed to delete secret from Vault: {e}") from e
+
+    def test(self) -> None:
+        """Verify connectivity and authentication against Vault.
+
+        Performs a lightweight check: authenticates (if needed) and confirms the
+        client can reach the configured KV v2 mount.
+
+        Raises:
+            VaultAuthError: If authentication fails
+            VaultError: If the connectivity check fails for any other reason
+        """
+        try:
+            self._ensure_authenticated()
+        except VaultError:
+            raise
+        except Exception as e:
+            logger.error("Vault connectivity check failed during authentication: %s", e)
+            raise VaultAuthError(f"Vault authentication check failed: {e}") from e
+
+        try:
+            self._client.secrets.kv.v2.read_configuration(mount_point=self._config.kv_mount)
+        except Exception as e:
+            logger.error("Vault connectivity check failed: %s", e)
+            raise VaultError(f"Vault connectivity check failed: {e}") from e
+
+
+class VaultError(Exception):
+    """Base exception for Vault operations."""
+
+    pass
+
+
+class VaultAuthError(VaultError):
+    """Exception for Vault authentication failures."""
+
+    pass

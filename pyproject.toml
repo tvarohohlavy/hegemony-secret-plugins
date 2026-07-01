@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-secret-plugins-workspace"
+version = "0.1.0"
+description = "Workspace for Hegemony secret backend SDK and plugin wheels"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27.0",
+    "pre-commit>=3.8.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.23.0",
+    "pyyaml>=6.0.0",
+    "reuse>=6.2.0",
+    "ruff>=0.14.13",
+    "ty>=0.0.14",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "packages/secret_sdk",
+    "plugins/secret_vault",
+    "plugins/secret_1password",
+]
+
+[tool.uv.sources]
+hegemony-secret-sdk = { workspace = true }
+hegemony-secret-vault = { workspace = true }
+hegemony-secret-1password = { workspace = true }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "build", "dist", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = [
+    "hegemony_secret_sdk",
+    "hegemony_secret_vault",
+    "hegemony_secret_1password",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["packages", "plugins", "tests", "scripts"]
+exclude = ["**/__pycache__", ".venv", "dist", "build"]
