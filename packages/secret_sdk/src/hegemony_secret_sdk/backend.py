@@ -13,18 +13,18 @@ to the underlying secret store (Vault, etc.).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class SecretBackend(Protocol):
     """A concrete secret backend instance, as built by a plugin's ``BackendFactory``."""
 
-    def read(self, path: str) -> Mapping[str, str] | None:
+    def read(self, path: str) -> Mapping[str, Any] | None:
         """Read the secret stored at ``path``; return ``None`` if it does not exist."""
         ...
 
-    def write(self, path: str, data: Mapping[str, str]) -> None:
+    def write(self, path: str, data: Mapping[str, Any]) -> None:
         """Write ``data`` to the secret stored at ``path``."""
         ...
 

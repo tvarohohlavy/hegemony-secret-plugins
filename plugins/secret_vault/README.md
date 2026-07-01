@@ -32,13 +32,14 @@ client); it never imports Hegemony platform internals.
 
 ## Install
 
-The wheel is **opt-in** — it is not bundled in the default images. See the root
-[Install From A Release](../../README.md#install-from-a-release) guide for Docker
-commands, checksum verification, and local-wheel development installs. Both the
-**API** (to list/validate the backend type and resolve secrets) and the
-**worker** (to resolve secrets at run time) need the wheel installed into
-`/opt/venv`; restart both after installing so each registry reloads its entry
-points.
+The wheel is **auto-installed** with the platform — it is already bundled in the
+default Hegemony API and worker images, so no separate install step is needed
+there. See the root [Install From A Release](../../README.md#install-from-a-release)
+guide for Docker commands, checksum verification, and local-wheel development
+installs if you need to install or upgrade it manually. Both the **API** (to
+list/validate the backend type and resolve secrets) and the **worker** (to
+resolve secrets at run time) need the wheel installed into `/opt/venv`; restart
+both after installing so each registry reloads its entry points.
 
 For local development against this repository:
 

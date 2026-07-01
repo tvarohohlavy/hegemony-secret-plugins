@@ -69,12 +69,15 @@ class _AsyncLoopRunner:
 
 
 _RUNNER: _AsyncLoopRunner | None = None
+_RUNNER_LOCK = threading.Lock()
 
 
 def _runner() -> _AsyncLoopRunner:
     global _RUNNER
     if _RUNNER is None:
-        _RUNNER = _AsyncLoopRunner()
+        with _RUNNER_LOCK:
+            if _RUNNER is None:
+                _RUNNER = _AsyncLoopRunner()
     return _RUNNER
 
 
@@ -189,7 +192,7 @@ class OnePasswordServiceAccountBackend:
         found_item = await client.items.get(vault_id, item_id)
         return {field.title: field.value for field in found_item.fields if field.value is not None}
 
-    def read(self, path: str) -> dict[str, Any] | None:
+    def read(self, path: str) -> dict[str, Any]:
         """Read a 1Password item's fields via a Service Account.
 
         Args:
@@ -197,8 +200,7 @@ class OnePasswordServiceAccountBackend:
                 item title/id, split on the first ``/``).
 
         Returns:
-            Mapping of field title to field value, or ``None`` if the item is not
-            found.
+            Mapping of field title to field value.
 
         Raises:
             ValueError: If ``path`` is not exactly two non-empty parts, or if the
