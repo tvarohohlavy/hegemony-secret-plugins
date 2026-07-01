@@ -18,9 +18,10 @@ from package_paths import ROOT
 EXPECTED_MODULES = (
     "hegemony_secret_sdk",
     "hegemony_secret_vault",
+    "hegemony_secret_1password",
 )
 
-EXPECTED_ENTRY_POINTS = {"vault"}
+EXPECTED_ENTRY_POINTS = {"vault", "onepassword"}
 
 
 def _python_bin(venv_dir: Path) -> Path:
@@ -29,8 +30,8 @@ def _python_bin(venv_dir: Path) -> Path:
 
 def main() -> None:
     wheels = sorted((ROOT / "dist").glob("*.whl"))
-    if len(wheels) != 2:
-        raise SystemExit(f"Expected 2 wheels in dist/, found {len(wheels)}")
+    if len(wheels) != 3:
+        raise SystemExit(f"Expected 3 wheels in dist/, found {len(wheels)}")
 
     tmp = Path(tempfile.mkdtemp(prefix="hegemony-secret-wheel-smoke-"))
     try:
@@ -49,13 +50,14 @@ from importlib.metadata import entry_points
 modules = (
     "hegemony_secret_sdk",
     "hegemony_secret_vault",
+    "hegemony_secret_1password",
 )
 for module in modules:
     import_module(module)
 
 entries = entry_points(group="hegemony.secret_backends")
 names = {entry.name for entry in entries}
-expected = {"vault"}
+expected = {"vault", "onepassword"}
 missing = expected - names
 assert not missing, missing
 """

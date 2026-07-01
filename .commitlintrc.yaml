@@ -11,6 +11,7 @@ rules:
     - "always"
     - - sdk
       - vault
+      - 1password
       - ci
       - deps
       - docs

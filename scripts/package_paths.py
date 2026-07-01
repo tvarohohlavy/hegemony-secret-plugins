@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_DIRS = (
     ROOT / "packages" / "secret_sdk",
     ROOT / "plugins" / "secret_vault",
+    ROOT / "plugins" / "secret_1password",
 )
 
 PLUGIN_DIRS = PACKAGE_DIRS[1:]
