@@ -24,13 +24,39 @@ class FakeRegistry:
 def test_register_adds_expected_backend_types():
     reg = FakeRegistry()
     plugin.register(reg)
-    assert set(reg.types) == {"vault", "vault_kv2", "vault_kv1"}
+    assert set(reg.types) == {"vault", "vault_kv2"}
+    assert reg.types["vault"]["factory"] is plugin.build_vault_backend
+    assert reg.types["vault_kv2"]["factory"] is plugin.build_vault_backend
     for entry in reg.types.values():
-        assert entry["factory"] is plugin.build_vault_backend
         assert entry["config_schema"]["type"] == "object"
         assert entry["config_schema"]["required"] == ["address"]
         assert entry["display_name"]
         assert entry["description"]
+
+
+def test_register_uses_distinct_display_names():
+    # Every backend type must render as a distinct label in the host's type dropdown;
+    # duplicate display names make entries indistinguishable to users.
+    reg = FakeRegistry()
+    plugin.register(reg)
+    display_names = [entry["display_name"] for entry in reg.types.values()]
+    assert len(display_names) == len(set(display_names))
+
+
+def test_register_display_names():
+    reg = FakeRegistry()
+    plugin.register(reg)
+    assert reg.types["vault"]["display_name"] == "HashiCorp Vault (KV v2)"
+    assert reg.types["vault_kv2"]["display_name"] == "HashiCorp Vault (KV v2, legacy type)"
+
+
+def test_register_marks_only_vault_kv2_hidden():
+    # vault_kv2 is a legacy alias of vault: resolvable for existing rows, hidden from
+    # create-time type pickers. The preferred vault type stays visible.
+    reg = FakeRegistry()
+    plugin.register(reg)
+    assert reg.types["vault_kv2"].get("hidden") is True
+    assert reg.types["vault"].get("hidden", False) is False
 
 
 def test_register_satisfies_sdk_registry_protocol():
@@ -44,10 +70,47 @@ def test_config_schema_marks_auth_material_as_secret_refs():
     plugin.register(reg)
     schema = reg.types["vault"]["config_schema"]
     properties = schema["properties"]
-    for field in ("token", "role_id", "secret_id", "role_id_file", "secret_id_file"):
+    for field in (
+        "token",
+        "role_id",
+        "secret_id",
+        "role_id_file",
+        "secret_id_file",
+        "api_role_id",
+        "api_secret_id",
+        "worker_role_id",
+        "worker_secret_id",
+    ):
         assert properties[field].get("x_secret_ref") is True, field
     assert "x_secret_ref" not in properties["address"]
     assert properties["verify_ssl"]["type"] == "boolean"
+
+
+def test_config_schema_includes_per_component_approle_overrides():
+    # The host remaps api_role_id/api_secret_id and worker_role_id/worker_secret_id to
+    # role_id/secret_id before building the client (see apps/api/routers/secrets.py,
+    # apps/api/services/git_ops.py, apps/worker/template_resolver.py in the host repo).
+    # These must be present in the schema so the schema-driven form can set them.
+    reg = FakeRegistry()
+    plugin.register(reg)
+    schema = reg.types["vault"]["config_schema"]
+    properties = schema["properties"]
+    for field in ("api_role_id", "api_secret_id", "worker_role_id", "worker_secret_id"):
+        assert properties[field]["type"] == "string"
+        assert properties[field].get("title")
+
+
+def test_config_schema_marks_component_overrides_with_fallback_of():
+    # x_fallback_of lets the host UI show which base field an override inherits from.
+    reg = FakeRegistry()
+    plugin.register(reg)
+    properties = reg.types["vault"]["config_schema"]["properties"]
+    assert properties["api_role_id"]["x_fallback_of"] == "role_id"
+    assert properties["worker_role_id"]["x_fallback_of"] == "role_id"
+    assert properties["api_secret_id"]["x_fallback_of"] == "secret_id"
+    assert properties["worker_secret_id"]["x_fallback_of"] == "secret_id"
+    assert "x_fallback_of" not in properties["role_id"]
+    assert "x_fallback_of" not in properties["secret_id"]
 
 
 @patch("hvac.Client")
@@ -120,6 +183,30 @@ def test_test_raises_vault_error_on_connectivity_failure():
         raise AssertionError("expected VaultError")
     except VaultError:
         pass
+
+
+def test_list_returns_kv2_keys():
+    backend, mock_client = _backend_with_mock_client()
+    mock_client.secrets.kv.v2.list_secrets.return_value = {"data": {"keys": ["db", "apps/"]}}
+    assert backend.list("orgs/default") == ["db", "apps/"]
+    mock_client.secrets.kv.v2.list_secrets.assert_called_once_with(
+        path="orgs/default", mount_point="hegemony"
+    )
+
+
+def test_list_unknown_path_returns_empty():
+    from hvac.exceptions import InvalidPath
+
+    backend, mock_client = _backend_with_mock_client()
+    mock_client.secrets.kv.v2.list_secrets.side_effect = InvalidPath()
+    assert backend.list("nope") == []
+
+
+def test_backend_satisfies_listable_protocol():
+    from hegemony_secret_sdk import ListableSecretBackend
+
+    backend, _ = _backend_with_mock_client()
+    assert isinstance(backend, ListableSecretBackend)
 
 
 def test_vault_backend_config_defaults():

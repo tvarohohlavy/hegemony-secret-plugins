@@ -5,11 +5,9 @@
 """Hegemony HashiCorp Vault secret backend plugin.
 
 Registers the Vault KV v2 backend under the ``hegemony.secret_backends`` entry-point
-group. Three type strings are registered (``vault``, ``vault_kv2``, ``vault_kv1``) to
-match every type string the Hegemony host currently accepts for Vault-backed secret
-backends (see ``apps/api/routers/secrets.py`` and ``apps/api/services/git_ops.py`` in
-the host repo); all three build the same :class:`VaultSecretsBackend`, which speaks the
-KV v2 API.
+group. Two type strings are registered: ``vault`` (the preferred generic type) and
+``vault_kv2`` (a hidden legacy alias of it, kept so existing backend rows keep
+resolving); both build the same KV v2 :class:`VaultSecretsBackend`.
 """
 
 from __future__ import annotations
@@ -67,6 +65,42 @@ _CONFIG_SCHEMA: dict[str, Any] = {
             "title": "AppRole secret ID file",
             "description": "Path to a file containing the AppRole secret ID.",
         },
+        "api_role_id": {
+            **_SECRET_REF_FIELD,
+            "title": "AppRole role ID (API override)",
+            "description": (
+                "Overrides role_id for the API component only. Set this when the API and "
+                "worker authenticate to Vault with different AppRoles."
+            ),
+            "x_fallback_of": "role_id",
+        },
+        "api_secret_id": {
+            **_SECRET_REF_FIELD,
+            "title": "AppRole secret ID (API override)",
+            "description": (
+                "Overrides secret_id for the API component only. Set this when the API and "
+                "worker authenticate to Vault with different AppRoles."
+            ),
+            "x_fallback_of": "secret_id",
+        },
+        "worker_role_id": {
+            **_SECRET_REF_FIELD,
+            "title": "AppRole role ID (worker override)",
+            "description": (
+                "Overrides role_id for the worker component only. Set this when the API and "
+                "worker authenticate to Vault with different AppRoles."
+            ),
+            "x_fallback_of": "role_id",
+        },
+        "worker_secret_id": {
+            **_SECRET_REF_FIELD,
+            "title": "AppRole secret ID (worker override)",
+            "description": (
+                "Overrides secret_id for the worker component only. Set this when the API and "
+                "worker authenticate to Vault with different AppRoles."
+            ),
+            "x_fallback_of": "secret_id",
+        },
         "ca_cert_file": {
             "type": "string",
             "title": "CA certificate file",
@@ -97,21 +131,14 @@ def register(registry: SecretBackendRegistry) -> None:
     )
     registry.register_backend_type(
         backend_type="vault_kv2",
-        display_name="HashiCorp Vault (KV v2)",
-        description="HashiCorp Vault secrets backend using the KV version 2 secrets engine.",
-        factory=build_vault_backend,
-        config_schema=_CONFIG_SCHEMA,
-    )
-    registry.register_backend_type(
-        backend_type="vault_kv1",
-        display_name="HashiCorp Vault (KV v1)",
+        display_name="HashiCorp Vault (KV v2, legacy type)",
         description=(
-            "HashiCorp Vault secrets backend type reserved for the legacy KV version 1 "
-            "secrets engine. The current client implementation speaks the KV v2 API; do "
-            "not point this type at a true KV v1 mount until KV v1 support is implemented."
+            "Legacy alias of the generic vault type; kept resolvable for existing "
+            "backends but hidden from create-time type pickers."
         ),
         factory=build_vault_backend,
         config_schema=_CONFIG_SCHEMA,
+        hidden=True,
     )
 
 

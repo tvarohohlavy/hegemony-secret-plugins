@@ -14,6 +14,7 @@ def test_public_surface_is_exported():
     assert sdk.SECRET_BACKEND_ENTRY_POINT_GROUP == "hegemony.secret_backends"
     assert isinstance(sdk.SDK_ABI_VERSION, int)
     assert hasattr(sdk, "SecretBackend")
+    assert hasattr(sdk, "ListableSecretBackend")
     assert hasattr(sdk, "SecretBackendRegistry")
     assert hasattr(sdk, "BackendFactory")
 
@@ -26,10 +27,36 @@ def test_secret_backend_is_runtime_checkable_protocol():
         def write(self, path: str, data) -> None:
             return None
 
+        def delete(self, path: str) -> None:
+            return None
+
         def test(self) -> None:
             return None
 
     assert isinstance(_Backend(), sdk.SecretBackend)
+
+
+def test_listable_backend_is_optional_extension():
+    class _PlainBackend:
+        def read(self, path: str):
+            return None
+
+        def write(self, path: str, data) -> None:
+            return None
+
+        def delete(self, path: str) -> None:
+            return None
+
+        def test(self) -> None:
+            return None
+
+    class _ListableBackend(_PlainBackend):
+        def list(self, path: str = "") -> list[str]:
+            return []
+
+    assert isinstance(_PlainBackend(), sdk.SecretBackend)
+    assert not isinstance(_PlainBackend(), sdk.ListableSecretBackend)
+    assert isinstance(_ListableBackend(), sdk.ListableSecretBackend)
 
 
 def test_registry_is_runtime_checkable_protocol():

@@ -11,6 +11,7 @@ values of a 1Password item.
 
 from __future__ import annotations
 
+import builtins
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -126,17 +127,105 @@ class OnePasswordConnectBackend:
         except FailedToRetrieveItemException:
             return None
 
-        return {field.label: field.value for field in result.fields if field.value is not None}
+        return {
+            field.label: field.value for field in result.fields or [] if field.value is not None
+        }
 
     def write(self, path: str, data: Mapping[str, Any]) -> None:
-        """Not supported: 1Password items are managed in 1Password.
+        """Create or update the 1Password item at ``path`` with ``data`` as its fields.
+
+        A new item is created as a Secure Note whose concealed custom fields are the
+        ``data`` keys; an existing item has its fields replaced with ``data``.
+
+        Args:
+            path: Reference path in ``"<vault>/<item>"`` form.
+            data: Mapping of field label to value.
 
         Raises:
-            NotImplementedError: Always.
+            ValueError: If ``path`` is malformed or the vault cannot be found.
         """
-        raise NotImplementedError(
-            "1Password items are managed in 1Password; this backend is read-only"
-        )
+        from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+        from onepasswordconnectsdk.models import Field, Item, ItemVault
+
+        vault, item_name = _split_path(path)
+        vault_id = self._resolve_vault_id(vault)
+        if vault_id is None:
+            raise ValueError(f"1Password vault not found: {vault!r}")
+
+        fields = [
+            Field(label=key, value=str(value), type="CONCEALED") for key, value in data.items()
+        ]
+
+        try:
+            existing = self._client.get_item(item_name, vault_id)
+        except FailedToRetrieveItemException:
+            existing = None
+
+        if existing is None:
+            self._client.create_item(
+                vault_id,
+                Item(
+                    title=item_name,
+                    category="SECURE_NOTE",
+                    vault=ItemVault(id=vault_id),
+                    fields=fields,
+                ),
+            )
+            return
+
+        existing.fields = fields
+        self._client.update_item(existing.id, vault_id, existing)
+
+    def delete(self, path: str) -> None:
+        """Delete the 1Password item at ``path``; a missing vault or item is not an error.
+
+        Args:
+            path: Reference path in ``"<vault>/<item>"`` form.
+
+        Raises:
+            ValueError: If ``path`` is malformed.
+        """
+        from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+        vault, item_name = _split_path(path)
+        vault_id = self._resolve_vault_id(vault)
+        if vault_id is None:
+            return
+        try:
+            existing = self._client.get_item(item_name, vault_id)
+        except FailedToRetrieveItemException:
+            return
+        self._client.delete_item(existing.id, vault_id)
+
+    # builtins.list because the method name shadows the builtin in class scope.
+    def list(self, path: str = "") -> builtins.list[str]:
+        """List vaults (empty ``path``) or the item titles inside one vault.
+
+        Args:
+            path: ``""`` to list vault names (returned with a trailing ``"/"``), or a
+                vault title/id to list its item titles (leaf entries).
+
+        Returns:
+            The immediate children under ``path``; ``[]`` for an unknown vault or for
+            anything deeper (items are leaves).
+        """
+        normalized = path.strip("/")
+        if not normalized:
+            return [f"{vault.name}/" for vault in self._client.get_vaults() or []]
+        if "/" in normalized:
+            return []
+
+        vault_id = self._resolve_vault_id(normalized)
+        if vault_id is None:
+            return []
+        return [item.title for item in self._client.get_items(vault_id) or []]
+
+    def _resolve_vault_id(self, vault: str) -> str | None:
+        """Resolve a vault title or id to its id; return ``None`` if not found."""
+        for candidate in self._client.get_vaults() or []:
+            if candidate.name == vault or candidate.id == vault:
+                return candidate.id
+        return None
 
     def test(self) -> None:
         """Verify connectivity and authentication against the Connect server.

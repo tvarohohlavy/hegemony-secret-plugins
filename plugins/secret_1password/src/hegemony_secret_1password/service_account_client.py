@@ -14,6 +14,8 @@ background event-loop thread is used to run every SDK coroutine.
 from __future__ import annotations
 
 import asyncio
+import builtins
+import concurrent.futures
 import logging
 import threading
 from collections.abc import Coroutine, Mapping
@@ -26,6 +28,14 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 _DEFAULT_INTEGRATION_NAME = "Hegemony"
+
+_SDK_CALL_TIMEOUT_SECONDS = 60
+"""Maximum time to wait for a single 1Password SDK coroutine to complete.
+
+Bounds how long the calling thread can be blocked by :meth:`_AsyncLoopRunner.run`;
+without it, a hung SDK call (e.g. a stalled network request) would pin a host
+worker thread indefinitely.
+"""
 
 
 def _integration_version() -> str:
@@ -78,7 +88,21 @@ class _AsyncLoopRunner:
         self._thread.start()
 
     def run(self, coro: Coroutine[Any, Any, _T]) -> _T:
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+        """Submit ``coro`` to the background loop and block for its result.
+
+        Waits at most :data:`_SDK_CALL_TIMEOUT_SECONDS`; if the coroutine has not
+        completed by then, it is cancelled on the background loop and a
+        :class:`TimeoutError` is raised instead of blocking the calling thread
+        forever.
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=_SDK_CALL_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError(
+                f"1Password SDK call timed out after {_SDK_CALL_TIMEOUT_SECONDS}s"
+            ) from None
 
 
 _RUNNER: _AsyncLoopRunner | None = None
@@ -185,27 +209,31 @@ class OnePasswordServiceAccountBackend:
                 self._client = _runner().run(self._authenticate())
             return self._client
 
-    async def _find_vault_id(self, client: Any, vault: str) -> str:
+    async def _find_vault_id(self, client: Any, vault: str) -> str | None:
         vault_overviews = await client.vaults.list()
         for overview in vault_overviews:
             if overview.title == vault or overview.id == vault:
                 return overview.id
-        raise ValueError(f"1Password vault not found: {vault!r}")
+        return None
 
-    async def _find_item_id(self, client: Any, vault_id: str, item: str) -> str:
+    async def _find_item_id(self, client: Any, vault_id: str, item: str) -> str | None:
         item_overviews = await client.items.list(vault_id)
         for overview in item_overviews:
             if overview.title == item or overview.id == item:
                 return overview.id
-        raise ValueError(f"1Password item not found: {item!r}")
+        return None
 
-    async def _read(self, client: Any, vault: str, item: str) -> dict[str, Any]:
+    async def _read(self, client: Any, vault: str, item: str) -> dict[str, Any] | None:
         vault_id = await self._find_vault_id(client, vault)
+        if vault_id is None:
+            return None
         item_id = await self._find_item_id(client, vault_id, item)
+        if item_id is None:
+            return None
         found_item = await client.items.get(vault_id, item_id)
         return {field.title: field.value for field in found_item.fields if field.value is not None}
 
-    def read(self, path: str) -> dict[str, Any]:
+    def read(self, path: str) -> dict[str, Any] | None:
         """Read a 1Password item's fields via a Service Account.
 
         Args:
@@ -213,25 +241,115 @@ class OnePasswordServiceAccountBackend:
                 item title/id, split on the first ``/``).
 
         Returns:
-            Mapping of field title to field value.
+            Mapping of field title to field value, or ``None`` if the vault or
+            item is not found.
 
         Raises:
-            ValueError: If ``path`` is not exactly two non-empty parts, or if the
-                vault or item cannot be found.
+            ValueError: If ``path`` is not exactly two non-empty parts.
         """
         vault, item = _split_path(path)
         client = self._ensure_client()
         return _runner().run(self._read(client, vault, item))
 
+    async def _write(
+        self, client: Any, vault: str, item_name: str, data: Mapping[str, Any]
+    ) -> None:
+        from onepassword import ItemCategory, ItemCreateParams, ItemField, ItemFieldType
+
+        vault_id = await self._find_vault_id(client, vault)
+        if vault_id is None:
+            raise ValueError(f"1Password vault not found: {vault!r}")
+
+        # The SDK's pydantic models declare camelCase aliases (fieldType, vaultId);
+        # attribute access stays snake_case (field.field_type, params.vault_id).
+        fields = [
+            ItemField(id=key, title=key, fieldType=ItemFieldType.CONCEALED, value=str(value))
+            for key, value in data.items()
+        ]
+
+        item_id = await self._find_item_id(client, vault_id, item_name)
+        if item_id is None:
+            await client.items.create(
+                ItemCreateParams(
+                    title=item_name,
+                    category=ItemCategory.SECURENOTE,
+                    vaultId=vault_id,
+                    fields=fields,
+                )
+            )
+            return
+
+        existing = await client.items.get(vault_id, item_id)
+        existing.fields = fields
+        await client.items.put(existing)
+
     def write(self, path: str, data: Mapping[str, Any]) -> None:
-        """Not supported: 1Password items are managed in 1Password.
+        """Create or update the 1Password item at ``path`` with ``data`` as its fields.
+
+        A new item is created as a Secure Note whose concealed custom fields are the
+        ``data`` keys; an existing item has its fields replaced with ``data``.
+
+        Args:
+            path: Reference path in ``"<vault>/<item>"`` form.
+            data: Mapping of field title to value.
 
         Raises:
-            NotImplementedError: Always.
+            ValueError: If ``path`` is malformed or the vault cannot be found.
         """
-        raise NotImplementedError(
-            "1Password items are managed in 1Password; this backend is read-only"
-        )
+        vault, item_name = _split_path(path)
+        client = self._ensure_client()
+        _runner().run(self._write(client, vault, item_name, data))
+
+    async def _delete(self, client: Any, vault: str, item_name: str) -> None:
+        vault_id = await self._find_vault_id(client, vault)
+        if vault_id is None:
+            return
+        item_id = await self._find_item_id(client, vault_id, item_name)
+        if item_id is None:
+            return
+        await client.items.delete(vault_id, item_id)
+
+    def delete(self, path: str) -> None:
+        """Delete the 1Password item at ``path``; a missing vault or item is not an error.
+
+        Args:
+            path: Reference path in ``"<vault>/<item>"`` form.
+
+        Raises:
+            ValueError: If ``path`` is malformed.
+        """
+        vault, item_name = _split_path(path)
+        client = self._ensure_client()
+        _runner().run(self._delete(client, vault, item_name))
+
+    async def _list(self, client: Any, path: str) -> builtins.list[str]:
+        normalized = path.strip("/")
+        if not normalized:
+            vault_overviews = await client.vaults.list()
+            return [f"{overview.title}/" for overview in vault_overviews]
+        if "/" in normalized:
+            return []
+
+        vault_id = await self._find_vault_id(client, normalized)
+        if vault_id is None:
+            return []
+        item_overviews = await client.items.list(vault_id)
+        return [overview.title for overview in item_overviews]
+
+    # builtins.list because the method name shadows the builtin in class scope.
+    def list(self, path: str = "") -> builtins.list[str]:
+        """List vaults (empty ``path``) or the item titles inside one vault.
+
+        Args:
+            path: ``""`` to list vault titles (returned with a trailing ``"/"``), or a
+                vault title/id to list its item titles (leaf entries).
+
+        Returns:
+            The immediate children under ``path``; ``[]`` for an unknown vault or for
+            anything deeper (items are leaves).
+        """
+        client = self._ensure_client()
+        return _runner().run(self._list(client, path))
 
     def test(self) -> None:
         """Verify connectivity and authentication against 1Password.

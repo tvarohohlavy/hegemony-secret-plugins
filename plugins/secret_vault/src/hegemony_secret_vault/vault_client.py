@@ -12,6 +12,7 @@ The client is designed to be used by both API and Worker components.
 
 from __future__ import annotations
 
+import builtins
 import logging
 import os
 import threading
@@ -387,6 +388,39 @@ class VaultSecretsBackend:
         except Exception as e:
             logger.error("Vault delete failed for path %s: %s", full_path, e)
             raise VaultError(f"Failed to delete secret from Vault: {e}") from e
+
+    # builtins.list because the method name shadows the builtin in class scope.
+    def list(self, path: str = "") -> builtins.list[str]:
+        """List the immediate children under ``path`` in Vault KV v2.
+
+        Container entries keep Vault's trailing ``"/"``; leaf entries are readable
+        secret names. An unknown path returns ``[]``.
+
+        Args:
+            path: Folder path relative to kv_mount and path_prefix ("" for the root)
+
+        Raises:
+            VaultError: If the list operation fails (other than not found)
+        """
+        from hvac.exceptions import InvalidPath
+
+        self._ensure_authenticated()
+
+        full_path = self._full_path(path)
+
+        try:
+            response = self._client.secrets.kv.v2.list_secrets(
+                path=full_path,
+                mount_point=self._config.kv_mount,
+            )
+            if response is None:
+                return []
+            return [str(key) for key in response.get("data", {}).get("keys", [])]
+        except InvalidPath:
+            return []
+        except Exception as e:
+            logger.error("Vault list failed for path %s: %s", full_path, e)
+            raise VaultError(f"Failed to list secrets in Vault: {e}") from e
 
     def test(self) -> None:
         """Verify connectivity and authentication against Vault.

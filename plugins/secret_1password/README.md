@@ -18,19 +18,25 @@ backend types:
 
 Both types resolve a `{{ secret('scheme://vault/item/field') }}` reference's
 `path` as `"<vault>/<item>"` (vault title/id and item title/id, split on the
-first `/`) and return a mapping of item field name to field value.
+first `/`) and return a mapping of item field name to field value. Per the
+`SecretBackend` contract, `read` returns `None` — rather than raising — when
+the vault or item cannot be found; a malformed `path` (not exactly two
+non-empty parts) still raises `ValueError`, since that is an input error
+rather than a missing secret.
 
 Secret backends are leaf components: unlike notification transports, the host
 injects no services or context into a backend. The registered `factory` receives
 only an already-resolved configuration dict and returns a backend instance whose
-`read`/`write`/`test` methods talk directly to 1Password. Both backends are
-read-only: `write` raises `NotImplementedError`, since 1Password items are managed
-in 1Password rather than through Hegemony.
+`read`/`write`/`delete`/`list`/`test` methods talk directly to 1Password. Writes
+upsert an item at `"<vault>/<item>"`: a new item is created as a Secure Note whose
+concealed custom fields are the written keys, and an existing item has its fields
+replaced. To prevent Hegemony from modifying a 1Password vault, mark the configured
+backend as read-only in its Hegemony backend settings.
 
 The Service Account backend wraps the official `onepassword-sdk`, which is
 asynchronous; it authenticates and runs all subsequent SDK calls on a dedicated
-background event-loop thread so its `read`/`test` methods remain synchronous and
-safe to call even from inside a host event loop.
+background event-loop thread so its synchronous methods remain safe to call even
+from inside a host event loop.
 
 This package depends only on [`hegemony-secret-sdk`](../../packages/secret_sdk),
 [`onepasswordconnectsdk`](https://pypi.org/project/onepasswordconnectsdk/) (the
@@ -98,6 +104,11 @@ host to run — the SDK talks to 1Password's cloud API directly.
   "service_account_token": "{{ env('OP_SERVICE_ACCOUNT_TOKEN') }}"
 }
 ```
+
+Auth tokens may also come from a bootstrap secret backend instead of the
+environment: any backend whose own config uses `env()`/`file()` exclusively
+(e.g. the platform's internal Vault) can be referenced with
+`{{ secret('vault://orgs/default/secrets/op/token') }}`.
 
 ## Usage
 

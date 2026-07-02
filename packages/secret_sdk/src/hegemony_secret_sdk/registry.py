@@ -43,6 +43,7 @@ class SecretBackendRegistry(Protocol):
         config_model: type[BaseModel] | None = None,
         config_schema: dict[str, Any] | None = None,
         default_config: dict[str, Any] | None = None,
+        hidden: bool = False,
     ) -> None:
         """Register a secret backend type with its config factory.
 
@@ -51,5 +52,11 @@ class SecretBackendRegistry(Protocol):
         other — the host may use ``config_model`` for validation/parsing and
         ``config_schema`` for UI rendering, so provide whichever (or both) your
         plugin needs.
+
+        ``hidden`` types stay registered and resolvable (existing configurations
+        referencing them keep working) but are omitted from create-time type pickers —
+        use it for legacy type-string aliases. Passing ``hidden`` requires a host built
+        with hidden-type support; on an older host the keyword raises ``TypeError`` and
+        the plugin fails to load.
         """
         ...

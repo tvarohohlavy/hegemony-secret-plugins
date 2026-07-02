@@ -12,6 +12,7 @@ to the underlying secret store (Vault, etc.).
 
 from __future__ import annotations
 
+import builtins
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
@@ -28,6 +29,28 @@ class SecretBackend(Protocol):
         """Write ``data`` to the secret stored at ``path``."""
         ...
 
+    def delete(self, path: str) -> None:
+        """Delete the secret stored at ``path``; deleting a missing secret is not an error."""
+        ...
+
     def test(self) -> None:
         """Verify connectivity/authentication against the backend; raise on failure."""
+        ...
+
+
+@runtime_checkable
+class ListableSecretBackend(SecretBackend, Protocol):
+    """A backend that can additionally enumerate its contents for browsing.
+
+    Implementing this protocol is optional; the host feature-detects it (``hasattr``/
+    ``isinstance``) and offers backend browsing only when present.
+    """
+
+    # builtins.list because the method name shadows the builtin in class scope.
+    def list(self, path: str = "") -> builtins.list[str]:
+        """List the names of the immediate children under ``path``.
+
+        Container entries (which can be listed further) end with ``"/"``; leaf entries
+        (readable secret paths) do not. An unknown or empty ``path`` returns ``[]``.
+        """
         ...

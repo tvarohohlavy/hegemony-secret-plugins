@@ -4,8 +4,11 @@
 
 """Tests for the 1Password secret backend plugin: registration + mocked-client behavior."""
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 import hegemony_secret_1password as plugin
 from hegemony_secret_1password.connect_client import (
@@ -15,6 +18,7 @@ from hegemony_secret_1password.connect_client import (
 from hegemony_secret_1password.service_account_client import (
     OnePasswordServiceAccountBackend,
     OnePasswordServiceAccountConfig,
+    _AsyncLoopRunner,
 )
 
 
@@ -123,6 +127,17 @@ def test_connect_read_skips_none_valued_fields():
     assert result == {"username": "alice"}
 
 
+def test_connect_read_handles_fieldless_item():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_item = MagicMock()
+    mock_item.fields = None
+    mock_client.get_item.return_value = mock_item
+
+    result = backend.read("Engineering/Database")
+
+    assert result == {}
+
+
 def test_connect_read_raises_value_error_for_malformed_path():
     backend, _ = _connect_backend_with_mock_client()
     try:
@@ -145,13 +160,78 @@ def test_connect_read_returns_none_for_missing_item():
     assert result is None
 
 
-def test_connect_write_raises_not_implemented():
-    backend, _ = _connect_backend_with_mock_client()
+def _fake_connect_vault(vault_id: str, name: str) -> MagicMock:
+    vault = MagicMock()
+    vault.id = vault_id
+    vault.name = name
+    return vault
+
+
+def test_connect_write_creates_secure_note_when_item_missing():
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("vault-1", "Engineering")]
+    mock_client.get_item.side_effect = FailedToRetrieveItemException("Found 0", status_code=404)
+
+    backend.write("Engineering/Database", {"password": "new"})
+
+    mock_client.create_item.assert_called_once()
+    vault_id, item = mock_client.create_item.call_args.args
+    assert vault_id == "vault-1"
+    assert item.title == "Database"
+    assert item.category == "SECURE_NOTE"
+    assert [(f.label, f.value) for f in item.fields] == [("password", "new")]
+    mock_client.update_item.assert_not_called()
+
+
+def test_connect_write_replaces_fields_of_existing_item():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("vault-1", "Engineering")]
+    existing = MagicMock()
+    existing.id = "item-1"
+    mock_client.get_item.return_value = existing
+
+    backend.write("Engineering/Database", {"password": "rotated"})
+
+    mock_client.create_item.assert_not_called()
+    mock_client.update_item.assert_called_once()
+    item_uuid, vault_id, item = mock_client.update_item.call_args.args
+    assert (item_uuid, vault_id) == ("item-1", "vault-1")
+    assert [(f.label, f.value) for f in item.fields] == [("password", "rotated")]
+
+
+def test_connect_write_unknown_vault_raises():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = []
     try:
-        backend.write("Engineering/Database", {"password": "new"})
-        raise AssertionError("expected NotImplementedError")
-    except NotImplementedError:
-        pass
+        backend.write("Nope/Database", {"password": "new"})
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "vault" in str(exc).lower()
+
+
+def test_connect_delete_removes_existing_item():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("vault-1", "Engineering")]
+    existing = MagicMock()
+    existing.id = "item-1"
+    mock_client.get_item.return_value = existing
+
+    backend.delete("Engineering/Database")
+
+    mock_client.delete_item.assert_called_once_with("item-1", "vault-1")
+
+
+def test_connect_delete_missing_item_is_not_an_error():
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("vault-1", "Engineering")]
+    mock_client.get_item.side_effect = FailedToRetrieveItemException("Found 0", status_code=404)
+
+    backend.delete("Engineering/Database")  # should not raise
+    mock_client.delete_item.assert_not_called()
 
 
 def test_connect_test_calls_get_vaults():
@@ -241,22 +321,79 @@ def test_service_account_read_raises_value_error_for_malformed_path():
         assert "vault" in str(exc).lower() or "path" in str(exc).lower()
 
 
-def test_service_account_read_raises_for_unknown_vault():
+def test_service_account_read_returns_none_for_unknown_vault():
     backend, mock_client = _service_account_backend_with_mock_client()
+
+    result = backend.read("NoSuchVault/Database")
+
+    assert result is None
+
+
+def test_service_account_read_returns_none_for_unknown_item():
+    backend, mock_client = _service_account_backend_with_mock_client()
+
+    result = backend.read("Engineering/NoSuchItem")
+
+    assert result is None
+
+
+def test_service_account_write_creates_secure_note_when_item_missing():
+    from onepassword import ItemCategory, ItemFieldType
+
+    backend, mock_client = _service_account_backend_with_mock_client()
+    mock_client.items.list = AsyncMock(return_value=[])  # no existing items
+    mock_client.items.create = AsyncMock()
+
+    backend.write("Engineering/Database", {"password": "new"})
+
+    mock_client.items.create.assert_called_once()
+    params = mock_client.items.create.call_args.args[0]
+    assert params.title == "Database"
+    assert params.vault_id == "vault-1"
+    assert params.category == ItemCategory.SECURENOTE
+    assert [(f.title, f.value, f.field_type) for f in params.fields] == [
+        ("password", "new", ItemFieldType.CONCEALED)
+    ]
+
+
+def test_service_account_write_replaces_fields_of_existing_item():
+    backend, mock_client = _service_account_backend_with_mock_client()
+    existing = MagicMock()
+    mock_client.items.get = AsyncMock(return_value=existing)
+    mock_client.items.put = AsyncMock()
+
+    backend.write("Engineering/Database", {"password": "rotated"})
+
+    mock_client.items.put.assert_called_once_with(existing)
+    assert [(f.title, f.value) for f in existing.fields] == [("password", "rotated")]
+
+
+def test_service_account_write_unknown_vault_raises():
+    backend, mock_client = _service_account_backend_with_mock_client()
+    mock_client.vaults.list = AsyncMock(return_value=[])
     try:
-        backend.read("NoSuchVault/Database")
+        backend.write("Nope/Database", {"password": "new"})
         raise AssertionError("expected ValueError")
     except ValueError as exc:
-        assert "NoSuchVault" in str(exc)
+        assert "vault" in str(exc).lower()
 
 
-def test_service_account_write_raises_not_implemented():
-    backend, _ = _service_account_backend_with_mock_client()
-    try:
-        backend.write("Engineering/Database", {"password": "new"})
-        raise AssertionError("expected NotImplementedError")
-    except NotImplementedError:
-        pass
+def test_service_account_delete_removes_existing_item():
+    backend, mock_client = _service_account_backend_with_mock_client()
+    mock_client.items.delete = AsyncMock()
+
+    backend.delete("Engineering/Database")
+
+    mock_client.items.delete.assert_called_once_with("vault-1", "item-1")
+
+
+def test_service_account_delete_missing_item_is_not_an_error():
+    backend, mock_client = _service_account_backend_with_mock_client()
+    mock_client.items.list = AsyncMock(return_value=[])
+    mock_client.items.delete = AsyncMock()
+
+    backend.delete("Engineering/Database")  # should not raise
+    mock_client.items.delete.assert_not_called()
 
 
 def test_service_account_test_calls_vaults_list():
@@ -275,3 +412,70 @@ def test_service_account_config_from_dict_custom_integration_name():
         {"service_account_token": "ops_test", "integration_name": "Custom"}
     )
     assert config.integration_name == "Custom"
+
+
+# --- Listing -------------------------------------------------------------------------
+
+
+def test_connect_list_root_returns_vaults_as_containers():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("vault-1", "Engineering")]
+    assert backend.list() == ["Engineering/"]
+
+
+def test_connect_list_vault_returns_item_titles():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("vault-1", "Engineering")]
+    item = MagicMock()
+    item.title = "Database"
+    mock_client.get_items.return_value = [item]
+
+    assert backend.list("Engineering") == ["Database"]
+    mock_client.get_items.assert_called_once_with("vault-1")
+
+
+def test_connect_list_unknown_vault_returns_empty():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = []
+    assert backend.list("Nope") == []
+
+
+def test_service_account_list_root_returns_vaults_as_containers():
+    backend, _ = _service_account_backend_with_mock_client()
+    assert backend.list() == ["Engineering/"]
+
+
+def test_service_account_list_vault_returns_item_titles():
+    backend, mock_client = _service_account_backend_with_mock_client()
+    assert backend.list("Engineering") == ["Database"]
+    mock_client.items.list.assert_called_once_with("vault-1")
+
+
+def test_service_account_list_unknown_vault_returns_empty():
+    backend, mock_client = _service_account_backend_with_mock_client()
+    mock_client.vaults.list = AsyncMock(return_value=[])
+    assert backend.list("Nope") == []
+
+
+def test_backends_satisfy_listable_protocol():
+    from hegemony_secret_sdk import ListableSecretBackend
+
+    connect_backend, _ = _connect_backend_with_mock_client()
+    sa_backend, _ = _service_account_backend_with_mock_client()
+    assert isinstance(connect_backend, ListableSecretBackend)
+    assert isinstance(sa_backend, ListableSecretBackend)
+
+
+# --- Async loop runner timeout -----------------------------------------------------
+
+
+def test_async_loop_runner_raises_timeout_error_for_hung_coroutine():
+    runner = _AsyncLoopRunner()
+    with (
+        patch(
+            "hegemony_secret_1password.service_account_client._SDK_CALL_TIMEOUT_SECONDS",
+            0.05,
+        ),
+        pytest.raises(TimeoutError, match="1Password SDK call timed out"),
+    ):
+        runner.run(asyncio.sleep(5))
