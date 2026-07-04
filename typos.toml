@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# typos configuration - https://github.com/crate-ci/typos
+# Add false positives here
+
+[files]
+extend-exclude = [
+    "*.lock",
+    "*.min.js",
+    "*.min.css",
+    "node_modules/",
+    ".venv/",
+    "apps/api/alembic/versions/",
+    "apps/ui/src/api/generated/",
+]
+
+[default]
+extend-ignore-identifiers-re = [
+    # Network/infra terms that look like typos
+    "oid",       # SNMP OID
+    "asn",       # Autonomous System Number
+    "tty",       # Terminal
+    "pty",       # Pseudo-terminal
+]
+
+[default.extend-words]
+# Technical terms that are valid
+ba = "ba"        # Base address
+nd = "nd"        # Node
+Hashi = "Hashi"  # HashiCorp vendor name stem

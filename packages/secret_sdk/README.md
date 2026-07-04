@@ -67,6 +67,21 @@ def register(registry: SecretBackendRegistry) -> None:
 A backend implements `read`, `write`, and `test` (a lightweight connectivity/auth
 check that raises on failure). See [`SecretBackend`](src/hegemony_secret_sdk/backend.py).
 
+### Config-schema extension keys
+
+The host understands a few `x_`-prefixed property keys in `config_schema`:
+
+- `x_secret_ref: true` — the field holds raw auth material; the host UI renders it
+  with the secret/variable picker instead of a plain text input.
+- `x_fallback_of: "<base field>"` — the field overrides `<base field>` when set; the
+  host UI shows the inheritance relationship on the form.
+- `x_component: "api" | "worker"` — combined with `x_fallback_of`, restricts the
+  override to one host process: before calling the factory, the named process copies
+  the field's value onto its base field and strips every `x_component`-marked field.
+  Factories therefore only ever see base fields (see the vault plugin's
+  `api_role_id`/`worker_role_id`, which let the API and worker authenticate with
+  different AppRoles).
+
 ## ABI
 
 `SDK_ABI_VERSION` is bumped only on incompatible changes to the registration

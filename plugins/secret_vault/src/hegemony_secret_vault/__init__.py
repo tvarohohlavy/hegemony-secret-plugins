@@ -65,6 +65,9 @@ _CONFIG_SCHEMA: dict[str, Any] = {
             "title": "AppRole secret ID file",
             "description": "Path to a file containing the AppRole secret ID.",
         },
+        # x_component tells the host which process applies an override onto its
+        # x_fallback_of base field before calling the factory; the factory itself only
+        # ever sees role_id/secret_id.
         "api_role_id": {
             **_SECRET_REF_FIELD,
             "title": "AppRole role ID (API override)",
@@ -73,6 +76,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                 "worker authenticate to Vault with different AppRoles."
             ),
             "x_fallback_of": "role_id",
+            "x_component": "api",
         },
         "api_secret_id": {
             **_SECRET_REF_FIELD,
@@ -82,6 +86,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                 "worker authenticate to Vault with different AppRoles."
             ),
             "x_fallback_of": "secret_id",
+            "x_component": "api",
         },
         "worker_role_id": {
             **_SECRET_REF_FIELD,
@@ -91,6 +96,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                 "worker authenticate to Vault with different AppRoles."
             ),
             "x_fallback_of": "role_id",
+            "x_component": "worker",
         },
         "worker_secret_id": {
             **_SECRET_REF_FIELD,
@@ -100,6 +106,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                 "worker authenticate to Vault with different AppRoles."
             ),
             "x_fallback_of": "secret_id",
+            "x_component": "worker",
         },
         "ca_cert_file": {
             "type": "string",
