@@ -245,3 +245,67 @@ def test_vault_backend_missing_auth_raises():
             raise AssertionError("expected ValueError for missing auth")
         except ValueError as exc:
             assert "role_id" in str(exc).lower()
+
+
+# --- AppRole auth lifecycle -------------------------------------------------------
+
+
+def _approle_backend_with_mock_client(**config_overrides) -> tuple[VaultSecretsBackend, MagicMock]:
+    config = VaultBackendConfig.from_dict({"address": "http://vault:8200", **config_overrides})
+    with patch("hvac.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        backend = VaultSecretsBackend(config)
+    return backend, mock_client
+
+
+def test_approle_non_expiring_token_authenticates_once():
+    """lease_duration 0 = a token that never expires; it must not force a fresh
+    AppRole login (and a new Vault token) on every single operation."""
+    backend, mock_client = _approle_backend_with_mock_client(role_id="rid", secret_id="sid")
+    mock_client.auth.approle.login.return_value = {"auth": {"lease_duration": 0}}
+    mock_client.secrets.kv.v2.read_secret_version.return_value = {"data": {"data": {"k": "v"}}}
+
+    backend.read("a/b")
+    backend.read("a/b")
+
+    assert mock_client.auth.approle.login.call_count == 1
+
+
+def test_approle_positive_lease_reuses_token_within_ttl():
+    backend, mock_client = _approle_backend_with_mock_client(role_id="rid", secret_id="sid")
+    mock_client.auth.approle.login.return_value = {"auth": {"lease_duration": 3600}}
+    mock_client.secrets.kv.v2.read_secret_version.return_value = {"data": {"data": {"k": "v"}}}
+
+    backend.read("a/b")
+    backend.read("a/b")
+
+    assert mock_client.auth.approle.login.call_count == 1
+
+
+def test_approle_reauth_rereads_credential_files(tmp_path):
+    """Rotated *_file contents (e.g. a Vault Agent re-writing the secret-id file) must
+    be picked up on the next authentication without rebuilding the client."""
+    role_file = tmp_path / "role_id"
+    secret_file = tmp_path / "secret_id"
+    role_file.write_text("rid-1\n")
+    secret_file.write_text("sid-1\n")
+    backend, mock_client = _approle_backend_with_mock_client(
+        role_id_file=str(role_file), secret_id_file=str(secret_file)
+    )
+    mock_client.auth.approle.login.return_value = {"auth": {"lease_duration": 3600}}
+    mock_client.secrets.kv.v2.read_secret_version.return_value = {"data": {"data": {}}}
+
+    backend.read("a/b")
+    assert mock_client.auth.approle.login.call_args.kwargs == {
+        "role_id": "rid-1",
+        "secret_id": "sid-1",
+    }
+
+    secret_file.write_text("sid-2\n")
+    backend._token_expiry = 0  # force re-authentication on the next call
+    backend.read("a/b")
+    assert mock_client.auth.approle.login.call_args.kwargs == {
+        "role_id": "rid-1",
+        "secret_id": "sid-2",
+    }

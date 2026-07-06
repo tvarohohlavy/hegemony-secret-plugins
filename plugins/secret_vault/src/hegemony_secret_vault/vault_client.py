@@ -154,14 +154,26 @@ class VaultSecretsBackend:
             # Token auth (dev mode) - use static token directly
             logger.debug("Using static token auth for Vault")
             self._client.token = self._static_token
-            self._role_id = ""
-            self._secret_id = ""
         else:
-            # AppRole auth (production) - resolve credentials from files if needed
-            self._role_id = self._resolve_credential(config.role_id, config.role_id_file, "role_id")
-            self._secret_id = self._resolve_credential(
-                config.secret_id, config.secret_id_file, "secret_id"
-            )
+            # AppRole auth (production) - resolve once now to fail fast on
+            # misconfiguration; _authenticate() re-resolves per login so rotated
+            # *_file contents (e.g. a Vault Agent sidecar re-writing the
+            # secret-id file) are picked up without a client rebuild.
+            self._resolve_approle_credentials()
+
+    def _resolve_approle_credentials(self) -> tuple[str, str]:
+        """Resolve the AppRole (role_id, secret_id) pair from config values or files.
+
+        Called at construction (validation) and again on every authentication, so
+        credentials delivered via files reflect the files' *current* contents.
+        """
+        role_id = self._resolve_credential(
+            self._config.role_id, self._config.role_id_file, "role_id"
+        )
+        secret_id = self._resolve_credential(
+            self._config.secret_id, self._config.secret_id_file, "secret_id"
+        )
+        return role_id, secret_id
 
     @staticmethod
     def _resolve_credential(
@@ -260,20 +272,27 @@ class VaultSecretsBackend:
         try:
             logger.debug("Authenticating to Vault with AppRole")
 
+            role_id, secret_id = self._resolve_approle_credentials()
             response = self._client.auth.approle.login(
-                role_id=self._role_id,
-                secret_id=self._secret_id,
+                role_id=role_id,
+                secret_id=secret_id,
             )
 
             # Extract token TTL and set expiry
             auth_data = response.get("auth", {})
             lease_duration = auth_data.get("lease_duration", 3600)
-            self._token_expiry = time.time() + lease_duration
-
-            logger.info(
-                "Vault authentication successful, token valid for %d seconds",
-                lease_duration,
-            )
+            if lease_duration and lease_duration > 0:
+                self._token_expiry = time.time() + lease_duration
+                logger.info(
+                    "Vault authentication successful, token valid for %d seconds",
+                    lease_duration,
+                )
+            else:
+                # lease_duration 0 means the token never expires; treating it as
+                # already-expired would force a fresh AppRole login (and a new
+                # Vault token) on every single operation.
+                self._token_expiry = float("inf")
+                logger.info("Vault authentication successful, token does not expire")
 
         except Exception as e:
             logger.error("Vault authentication failed: %s", e)

@@ -13,11 +13,38 @@ from __future__ import annotations
 
 import builtins
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
+
+# The Connect SDK's title-based lookups embed the HTTP status only in the exception
+# message ("Unable to retrieve items. Received 401 ..."); ``status_code`` is attached
+# solely by id-based lookups.
+_RECEIVED_STATUS_PATTERN = re.compile(r"\bReceived (\d{3})\b")
+
+
+def _extract_status_code(exc: Exception) -> int | None:
+    """Best-effort HTTP status carried by a Connect SDK exception, or ``None``."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    match = _RECEIVED_STATUS_PATTERN.search(str(exc))
+    return int(match.group(1)) if match else None
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """Whether an SDK lookup failure means "does not exist" rather than a real error.
+
+    The SDK raises ``FailedToRetrieveItemException`` for *any* failure — a missing
+    item/vault, but also 401/403/5xx responses. Treating those alike would surface an
+    expired Connect token as "secret not found", so only a 404 (or a pure lookup miss
+    carrying no HTTP status at all, e.g. "Found 0 items") counts as not-found.
+    """
+    status = _extract_status_code(exc)
+    return status is None or status == 404
 
 
 def _split_path(path: str) -> tuple[str, str]:
@@ -117,6 +144,8 @@ class OnePasswordConnectBackend:
 
         Raises:
             ValueError: If ``path`` is not exactly two non-empty parts.
+            FailedToRetrieveItemException: If the lookup fails for any reason other
+                than the vault/item not existing (e.g. auth or server errors).
         """
         from onepasswordconnectsdk.errors import FailedToRetrieveItemException
 
@@ -124,8 +153,10 @@ class OnePasswordConnectBackend:
 
         try:
             result = self._client.get_item(item, vault)
-        except FailedToRetrieveItemException:
-            return None
+        except FailedToRetrieveItemException as exc:
+            if _is_not_found(exc):
+                return None
+            raise
 
         return {
             field.label: field.value for field in result.fields or [] if field.value is not None
@@ -158,7 +189,9 @@ class OnePasswordConnectBackend:
 
         try:
             existing = self._client.get_item(item_name, vault_id)
-        except FailedToRetrieveItemException:
+        except FailedToRetrieveItemException as exc:
+            if not _is_not_found(exc):
+                raise
             existing = None
 
         if existing is None:
@@ -193,8 +226,10 @@ class OnePasswordConnectBackend:
             return
         try:
             existing = self._client.get_item(item_name, vault_id)
-        except FailedToRetrieveItemException:
-            return
+        except FailedToRetrieveItemException as exc:
+            if _is_not_found(exc):
+                return
+            raise
         self._client.delete_item(existing.id, vault_id)
 
     # builtins.list because the method name shadows the builtin in class scope.

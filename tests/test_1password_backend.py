@@ -479,3 +479,58 @@ def test_async_loop_runner_raises_timeout_error_for_hung_coroutine():
         pytest.raises(TimeoutError, match="1Password SDK call timed out"),
     ):
         runner.run(asyncio.sleep(5))
+
+
+# --- Connect error discrimination (not-found vs real failures) --------------------
+
+
+def test_connect_read_returns_none_for_lookup_miss_without_status():
+    """Title-based lookup misses ("Found 0 items") carry no HTTP status at all."""
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_item.side_effect = FailedToRetrieveItemException(
+        "Found 0 items in vault v1 with title Database"
+    )
+
+    assert backend.read("Engineering/Database") is None
+
+
+def test_connect_read_reraises_auth_error_embedded_in_message():
+    """Title-based lookups embed the HTTP status only in the message; a 401 must not
+    be masked as "secret not found"."""
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_item.side_effect = FailedToRetrieveItemException(
+        "Unable to retrieve items. Received 401 for /v1/vaults with message: invalid bearer token"
+    )
+
+    with pytest.raises(FailedToRetrieveItemException):
+        backend.read("Engineering/Database")
+
+
+def test_connect_read_reraises_non_404_status_code():
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_item.side_effect = FailedToRetrieveItemException(
+        "Unable to retrieve item.", status_code=403
+    )
+
+    with pytest.raises(FailedToRetrieveItemException):
+        backend.read("Engineering/Database")
+
+
+def test_connect_delete_reraises_auth_error_on_item_probe():
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("v1", "Engineering")]
+    mock_client.get_item.side_effect = FailedToRetrieveItemException(
+        "Unable to retrieve item.", status_code=401
+    )
+
+    with pytest.raises(FailedToRetrieveItemException):
+        backend.delete("Engineering/Database")
+    mock_client.delete_item.assert_not_called()
