@@ -445,12 +445,17 @@ class VaultSecretsBackend:
         """Verify connectivity and authentication against Vault.
 
         Performs a lightweight check: authenticates (if needed) and confirms the
-        client can reach the configured KV v2 mount.
+        client can reach the configured KV v2 mount. Reads the mount configuration
+        when the token's policy allows it; typical app policies don't grant read on
+        ``<mount>/config``, so a Forbidden there falls back to a LIST on the metadata
+        root (an empty mount's 404 still proves mount + auth are good).
 
         Raises:
             VaultAuthError: If authentication fails
             VaultError: If the connectivity check fails for any other reason
         """
+        from hvac.exceptions import Forbidden, InvalidPath
+
         try:
             self._ensure_authenticated()
         except VaultError:
@@ -461,6 +466,21 @@ class VaultSecretsBackend:
 
         try:
             self._client.secrets.kv.v2.read_configuration(mount_point=self._config.kv_mount)
+            return
+        except Forbidden:
+            logger.debug("Vault mount config read forbidden; falling back to metadata LIST")
+        except Exception as e:
+            logger.error("Vault connectivity check failed: %s", e)
+            raise VaultError(f"Vault connectivity check failed: {e}") from e
+
+        try:
+            self._client.secrets.kv.v2.list_secrets(
+                path=self._config.path_prefix or "",
+                mount_point=self._config.kv_mount,
+            )
+        except InvalidPath:
+            # Empty mount/prefix: the request reached the mount with valid auth.
+            return
         except Exception as e:
             logger.error("Vault connectivity check failed: %s", e)
             raise VaultError(f"Vault connectivity check failed: {e}") from e

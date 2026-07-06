@@ -309,3 +309,46 @@ def test_approle_reauth_rereads_credential_files(tmp_path):
         "role_id": "rid-1",
         "secret_id": "sid-2",
     }
+
+
+# --- connectivity self-test probe --------------------------------------------------
+
+
+def test_test_falls_back_to_metadata_list_when_config_read_forbidden():
+    """Typical app policies don't grant read on <mount>/config; the probe must fall
+    back to a metadata LIST instead of reporting a false failure."""
+    from hvac.exceptions import Forbidden
+
+    backend, mock_client = _backend_with_mock_client()
+    mock_client.secrets.kv.v2.read_configuration.side_effect = Forbidden()
+    mock_client.secrets.kv.v2.list_secrets.return_value = {"data": {"keys": ["a"]}}
+
+    backend.test()  # must not raise
+
+    mock_client.secrets.kv.v2.list_secrets.assert_called_once_with(path="", mount_point="hegemony")
+
+
+def test_test_fallback_tolerates_empty_mount():
+    from hvac.exceptions import Forbidden, InvalidPath
+
+    backend, mock_client = _backend_with_mock_client()
+    mock_client.secrets.kv.v2.read_configuration.side_effect = Forbidden()
+    mock_client.secrets.kv.v2.list_secrets.side_effect = InvalidPath()
+
+    backend.test()  # 404 on an empty mount still proves mount + auth are good
+
+
+def test_test_fallback_raises_on_real_failure():
+    from hvac.exceptions import Forbidden
+
+    from hegemony_secret_vault.vault_client import VaultError
+
+    backend, mock_client = _backend_with_mock_client()
+    mock_client.secrets.kv.v2.read_configuration.side_effect = Forbidden()
+    mock_client.secrets.kv.v2.list_secrets.side_effect = ConnectionError("boom")
+
+    try:
+        backend.test()
+        raise AssertionError("expected VaultError")
+    except VaultError:
+        pass

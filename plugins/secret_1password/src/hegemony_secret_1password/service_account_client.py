@@ -210,18 +210,43 @@ class OnePasswordServiceAccountBackend:
             return self._client
 
     async def _find_vault_id(self, client: Any, vault: str) -> str | None:
+        """Resolve a vault title or id to its id; return ``None`` if not found.
+
+        Raises:
+            ValueError: If more than one vault matches the title (silently picking
+                one could read or write the wrong vault's secrets).
+        """
         vault_overviews = await client.vaults.list()
-        for overview in vault_overviews:
-            if overview.title == vault or overview.id == vault:
-                return overview.id
-        return None
+        matches = [
+            overview.id
+            for overview in vault_overviews
+            if overview.title == vault or overview.id == vault
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"1Password vault title {vault!r} is ambiguous ({len(matches)} vaults); "
+                "use the vault id instead"
+            )
+        return matches[0] if matches else None
 
     async def _find_item_id(self, client: Any, vault_id: str, item: str) -> str | None:
+        """Resolve an item title or id to its id; return ``None`` if not found.
+
+        Raises:
+            ValueError: If more than one item matches the title.
+        """
         item_overviews = await client.items.list(vault_id)
-        for overview in item_overviews:
-            if overview.title == item or overview.id == item:
-                return overview.id
-        return None
+        matches = [
+            overview.id
+            for overview in item_overviews
+            if overview.title == item or overview.id == item
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"1Password item title {item!r} is ambiguous ({len(matches)} items in "
+                "the vault); use the item id instead"
+            )
+        return matches[0] if matches else None
 
     async def _read(self, client: Any, vault: str, item: str) -> dict[str, Any] | None:
         vault_id = await self._find_vault_id(client, vault)
@@ -280,6 +305,12 @@ class OnePasswordServiceAccountBackend:
             return
 
         existing = await client.items.get(vault_id, item_id)
+        if existing.category != ItemCategory.SECURENOTE:
+            raise ValueError(
+                f"1Password item {item_name!r} is a {existing.category} item, not a "
+                "Hegemony-managed Secure Note; refusing to replace its fields. "
+                "Update it in 1Password directly."
+            )
         existing.fields = fields
         await client.items.put(existing)
 
@@ -287,14 +318,19 @@ class OnePasswordServiceAccountBackend:
         """Create or update the 1Password item at ``path`` with ``data`` as its fields.
 
         A new item is created as a Secure Note whose concealed custom fields are the
-        ``data`` keys; an existing item has its fields replaced with ``data``.
+        ``data`` keys; an existing Secure Note has its fields replaced with ``data``
+        (replace, not merge — the host implements key deletion by writing the reduced
+        mapping). Items of any other category (LOGIN, ...) are refused: replacing
+        their fields would destroy built-in username/password fields of an item
+        Hegemony does not manage.
 
         Args:
             path: Reference path in ``"<vault>/<item>"`` form.
             data: Mapping of field title to value.
 
         Raises:
-            ValueError: If ``path`` is malformed or the vault cannot be found.
+            ValueError: If ``path`` is malformed, the vault cannot be found, or the
+                existing item is not a Secure Note.
         """
         vault, item_name = _split_path(path)
         client = self._ensure_client()

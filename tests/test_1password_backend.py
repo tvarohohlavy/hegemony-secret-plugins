@@ -190,6 +190,7 @@ def test_connect_write_replaces_fields_of_existing_item():
     mock_client.get_vaults.return_value = [_fake_connect_vault("vault-1", "Engineering")]
     existing = MagicMock()
     existing.id = "item-1"
+    existing.category = "SECURE_NOTE"  # only Hegemony-managed Secure Notes are rewritten
     mock_client.get_item.return_value = existing
 
     backend.write("Engineering/Database", {"password": "rotated"})
@@ -357,8 +358,11 @@ def test_service_account_write_creates_secure_note_when_item_missing():
 
 
 def test_service_account_write_replaces_fields_of_existing_item():
+    from onepassword import ItemCategory
+
     backend, mock_client = _service_account_backend_with_mock_client()
     existing = MagicMock()
+    existing.category = ItemCategory.SECURENOTE  # only Secure Notes are rewritten
     mock_client.items.get = AsyncMock(return_value=existing)
     mock_client.items.put = AsyncMock()
 
@@ -534,3 +538,74 @@ def test_connect_delete_reraises_auth_error_on_item_probe():
     with pytest.raises(FailedToRetrieveItemException):
         backend.delete("Engineering/Database")
     mock_client.delete_item.assert_not_called()
+
+
+def test_connect_read_reraises_ambiguous_title():
+    """ "Found 2 items" means a duplicated title — surfacing it as "not found" would
+    silently hide a real, actionable problem."""
+    from onepasswordconnectsdk.errors import FailedToRetrieveItemException
+
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_item.side_effect = FailedToRetrieveItemException(
+        "Found 2 items in vault v1 with title Database"
+    )
+
+    with pytest.raises(FailedToRetrieveItemException):
+        backend.read("Engineering/Database")
+
+
+def test_connect_resolve_vault_rejects_ambiguous_title():
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [
+        _fake_connect_vault("v1", "Engineering"),
+        _fake_connect_vault("v2", "Engineering"),
+    ]
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        backend.delete("Engineering/Database")
+
+
+# --- write refuses non-Secure-Note items -------------------------------------------
+
+
+def test_connect_write_refuses_non_secure_note_item():
+    """Replacing a LOGIN item's fields would destroy its built-in username/password;
+    Hegemony only rewrites the Secure Notes it manages."""
+    backend, mock_client = _connect_backend_with_mock_client()
+    mock_client.get_vaults.return_value = [_fake_connect_vault("v1", "Engineering")]
+    existing = MagicMock()
+    existing.category = "LOGIN"
+    mock_client.get_item.return_value = existing
+
+    with pytest.raises(ValueError, match="Secure Note"):
+        backend.write("Engineering/Database", {"password": "x"})
+    mock_client.update_item.assert_not_called()
+
+
+def test_service_account_write_refuses_non_secure_note_item():
+    from onepassword import ItemCategory
+
+    backend, mock_client = _service_account_backend_with_mock_client()
+    mock_client.vaults.list = AsyncMock(return_value=[_fake_vault_overview("v1", "Engineering")])
+    mock_client.items.list = AsyncMock(return_value=[_fake_item_overview("i1", "Database")])
+    existing = MagicMock()
+    existing.category = ItemCategory.LOGIN
+    mock_client.items.get = AsyncMock(return_value=existing)
+    mock_client.items.put = AsyncMock()
+
+    with pytest.raises(ValueError, match="Secure Note"):
+        backend.write("Engineering/Database", {"password": "x"})
+    mock_client.items.put.assert_not_called()
+
+
+def test_service_account_ambiguous_vault_title_raises():
+    backend, mock_client = _service_account_backend_with_mock_client()
+    mock_client.vaults.list = AsyncMock(
+        return_value=[
+            _fake_vault_overview("v1", "Engineering"),
+            _fake_vault_overview("v2", "Engineering"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        backend.read("Engineering/Database")

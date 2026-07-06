@@ -22,8 +22,10 @@ logger = logging.getLogger(__name__)
 
 # The Connect SDK's title-based lookups embed the HTTP status only in the exception
 # message ("Unable to retrieve items. Received 401 ..."); ``status_code`` is attached
-# solely by id-based lookups.
+# solely by id-based lookups. Pure lookup misses/ambiguities carry no status at all
+# ("Found 0 items in vault ...", "Found 2 vaults with name ...").
 _RECEIVED_STATUS_PATTERN = re.compile(r"\bReceived (\d{3})\b")
+_FOUND_COUNT_PATTERN = re.compile(r"\bFound (\d+) (?:items|vaults)\b")
 
 
 def _extract_status_code(exc: Exception) -> int | None:
@@ -39,12 +41,17 @@ def _is_not_found(exc: Exception) -> bool:
     """Whether an SDK lookup failure means "does not exist" rather than a real error.
 
     The SDK raises ``FailedToRetrieveItemException`` for *any* failure — a missing
-    item/vault, but also 401/403/5xx responses. Treating those alike would surface an
-    expired Connect token as "secret not found", so only a 404 (or a pure lookup miss
-    carrying no HTTP status at all, e.g. "Found 0 items") counts as not-found.
+    item/vault, but also 401/403/5xx responses and ambiguous titles ("Found 2 items").
+    Treating those alike would surface an expired Connect token — or a duplicated
+    title — as "secret not found", so only a 404 or a status-less zero-match lookup
+    counts as not-found.
     """
     status = _extract_status_code(exc)
-    return status is None or status == 404
+    if status is not None:
+        return status == 404
+    match = _FOUND_COUNT_PATTERN.search(str(exc))
+    # A multi-match ("Found 2 items") is an ambiguous title — a real error, not a miss.
+    return not (match and int(match.group(1)) > 1)
 
 
 def _split_path(path: str) -> tuple[str, str]:
@@ -166,14 +173,19 @@ class OnePasswordConnectBackend:
         """Create or update the 1Password item at ``path`` with ``data`` as its fields.
 
         A new item is created as a Secure Note whose concealed custom fields are the
-        ``data`` keys; an existing item has its fields replaced with ``data``.
+        ``data`` keys; an existing Secure Note has its fields replaced with ``data``
+        (replace, not merge — the host implements key deletion by writing the reduced
+        mapping). Items of any other category (LOGIN, ...) are refused: replacing
+        their fields would destroy built-in username/password fields and sections of
+        an item Hegemony does not manage.
 
         Args:
             path: Reference path in ``"<vault>/<item>"`` form.
             data: Mapping of field label to value.
 
         Raises:
-            ValueError: If ``path`` is malformed or the vault cannot be found.
+            ValueError: If ``path`` is malformed, the vault cannot be found, or the
+                existing item is not a Secure Note.
         """
         from onepasswordconnectsdk.errors import FailedToRetrieveItemException
         from onepasswordconnectsdk.models import Field, Item, ItemVault
@@ -205,6 +217,13 @@ class OnePasswordConnectBackend:
                 ),
             )
             return
+
+        if (existing.category or "").upper() != "SECURE_NOTE":
+            raise ValueError(
+                f"1Password item {item_name!r} is a {existing.category} item, not a "
+                "Hegemony-managed Secure Note; refusing to replace its fields. "
+                "Update it in 1Password directly."
+            )
 
         existing.fields = fields
         self._client.update_item(existing.id, vault_id, existing)
@@ -256,11 +275,23 @@ class OnePasswordConnectBackend:
         return [item.title for item in self._client.get_items(vault_id) or []]
 
     def _resolve_vault_id(self, vault: str) -> str | None:
-        """Resolve a vault title or id to its id; return ``None`` if not found."""
-        for candidate in self._client.get_vaults() or []:
-            if candidate.name == vault or candidate.id == vault:
-                return candidate.id
-        return None
+        """Resolve a vault title or id to its id; return ``None`` if not found.
+
+        Raises:
+            ValueError: If more than one vault matches the title (silently picking
+                one could read or write the wrong vault's secrets).
+        """
+        matches = [
+            candidate.id
+            for candidate in self._client.get_vaults() or []
+            if candidate.name == vault or candidate.id == vault
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"1Password vault title {vault!r} is ambiguous ({len(matches)} vaults); "
+                "use the vault id instead"
+            )
+        return matches[0] if matches else None
 
     def test(self) -> None:
         """Verify connectivity and authentication against the Connect server.
