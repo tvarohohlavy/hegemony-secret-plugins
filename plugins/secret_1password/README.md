@@ -24,6 +24,19 @@ the vault or item cannot be found; a malformed `path` (not exactly two
 non-empty parts) still raises `ValueError`, since that is an input error
 rather than a missing secret.
 
+## Multi-tenant (organization) path layout
+
+Hegemony namespaces per-organization secrets as `orgs/<slug>/secrets/<folder>`
+and enforces that confinement host-side, before any backend call. Under the
+split-on-first-`/` rule above such a path maps to the 1Password vault named
+`orgs` with the item title `"<slug>/secrets/<folder>"`: reads and writes work
+and stay distinct per organization (the slug is part of the item title), but
+every organization's items land in that single `orgs` vault, and `list` does
+not browse below one path segment, so backend folder discovery is unavailable
+for org namespaces. For multi-tenant deployments prefer the Vault backend
+(which maps the org namespace onto a real path hierarchy), or register a
+dedicated 1Password backend per organization.
+
 Secret backends are leaf components: unlike notification transports, the host
 injects no services or context into a backend. The registered `factory` receives
 only an already-resolved configuration dict and returns a backend instance whose
