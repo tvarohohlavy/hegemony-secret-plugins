@@ -136,5 +136,7 @@ The portion after `scheme://` splits on the last `/`: everything before it is
 the `path` passed to `read(path)` — here `Engineering/Database`, split on the
 first `/` into vault (`Engineering`) and item (`Database`) title-or-id — and
 the final segment is the `key` looked up by field name in the item (here
-`password`). `write` always raises `NotImplementedError` for both backend
-types.
+`password`). Both backend types also implement `write` — it upserts the item at
+`path` (creating a Secure Note, or replacing an existing Secure Note's fields),
+as described above; mark the backend read-only in its Hegemony settings to keep
+a 1Password vault from being modified.
